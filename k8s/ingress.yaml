@@ -1,0 +1,48 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hydrus-ingress
+  namespace: hydrus
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    # Rate limiting
+    nginx.ingress.kubernetes.io/limit-rpm: "300"
+    # Proxy settings for large uploads
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    # TLS certificate via cert-manager
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+    - hosts:
+        - hydrus.example.com
+      secretName: hydrus-tls
+  rules:
+    - host: hydrus.example.com
+      http:
+        paths:
+          # Backend API routes
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: hydrus-backend-svc
+                port:
+                  number: 80
+          # Health endpoint (for external monitoring)
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: hydrus-backend-svc
+                port:
+                  number: 80
+          # Frontend — catch all
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hydrus-frontend-svc
+                port:
+                  number: 80

@@ -1,0 +1,129 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  acrLoginServer: $(ACR_LOGIN_SERVER)   # Set in Variable Group — not hardcoded
+  aksCluster:     $(AKS_CLUSTER_NAME)
+  aksRG:          $(AKS_RESOURCE_GROUP)
+  k8sNamespace:   hydrus
+  imageTag:       $(Build.SourceBranchName)-$(Build.SourceVersion)
+
+stages:
+
+# ── Stage 1: Build ─────────────────────────────────────────────────────────────
+- stage: Build
+  displayName: "Build & Push Images"
+  jobs:
+    - job: BuildPush
+      displayName: "Docker Build + ACR Push"
+      pool:
+        vmImage: ubuntu-latest
+
+      steps:
+        - task: AzureCLI@2
+          displayName: "Azure Login + ACR Login"
+          inputs:
+            azureSubscription: $(AZURE_SERVICE_CONNECTION)
+            scriptType: bash
+            scriptLocation: inlineScript
+            inlineScript: az acr login --name $(ACR_NAME)
+
+        - task: Docker@2
+          displayName: "Build & Push Backend"
+          inputs:
+            command: buildAndPush
+            repository: hydrus-backend
+            dockerfile: backend/Dockerfile
+            containerRegistry: $(AZURE_CONTAINER_REGISTRY_SERVICE_CONNECTION)
+            tags: |
+              $(imageTag)
+              latest
+
+        - task: Docker@2
+          displayName: "Build & Push Frontend"
+          inputs:
+            command: buildAndPush
+            repository: hydrus-frontend
+            dockerfile: frontend/Dockerfile
+            containerRegistry: $(AZURE_CONTAINER_REGISTRY_SERVICE_CONNECTION)
+            tags: |
+              $(imageTag)
+              latest
+
+        # Container vulnerability scanning (bonus)
+        - task: AzureCLI@2
+          displayName: "Trivy Vulnerability Scan"
+          inputs:
+            azureSubscription: $(AZURE_SERVICE_CONNECTION)
+            scriptType: bash
+            scriptLocation: inlineScript
+            inlineScript: |
+              docker run --rm \
+                aquasec/trivy image \
+                --exit-code 1 \
+                --severity CRITICAL,HIGH \
+                $(acrLoginServer)/hydrus-backend:$(imageTag)
+
+# ── Stage 2: Deploy ─────────────────────────────────────────────────────────────
+- stage: Deploy
+  displayName: "Deploy to AKS"
+  dependsOn: Build
+  condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'main', 'develop'))
+
+  jobs:
+    - deployment: DeployAKS
+      displayName: "Deploy to AKS"
+      environment: "$(k8sNamespace)"
+      pool:
+        vmImage: ubuntu-latest
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - task: AzureCLI@2
+                displayName: "Get AKS credentials"
+                inputs:
+                  azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                  scriptType: bash
+                  scriptLocation: inlineScript
+                  inlineScript: |
+                    az aks get-credentials \
+                      --resource-group $(aksRG) \
+                      --name $(aksCluster) \
+                      --overwrite-existing
+
+              - task: KubernetesManifest@1
+                displayName: "Apply K8s manifests"
+                inputs:
+                  action: deploy
+                  namespace: $(k8sNamespace)
+                  manifests: |
+                    k8s/namespace.yaml
+                    k8s/configmap.yaml
+                    k8s/backend-deployment.yaml
+                    k8s/frontend-deployment.yaml
+                    k8s/ingress.yaml
+                    k8s/hpa.yaml
+                  containers: |
+                    $(acrLoginServer)/hydrus-backend:$(imageTag)
+                    $(acrLoginServer)/hydrus-frontend:$(imageTag)
+
+              - task: AzureCLI@2
+                displayName: "Smoke Test"
+                inputs:
+                  azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                  scriptType: bash
+                  scriptLocation: inlineScript
+                  inlineScript: |
+                    STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+                      https://hydrus.example.com/health)
+                    echo "Health check HTTP status: $STATUS"
+                    [ "$STATUS" = "200" ] || exit 1
