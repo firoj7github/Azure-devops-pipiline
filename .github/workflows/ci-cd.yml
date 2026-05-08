@@ -1,288 +1,65 @@
-name: CI — Build · Scan · Push · Update Manifests
+name: Build, Scan, Push and Deploy Laravel App
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Trigger: push to main/develop, or PRs targeting those branches
-# Deploy:  only on push (not PRs). ArgoCD handles the actual AKS sync.
-# ─────────────────────────────────────────────────────────────────────────────
 on:
   push:
     branches:
       - main
-      - develop
-  pull_request:
-    branches:
-      - main
-      - develop
 
-env:
-  ACR_NAME: ${{ secrets.ACR_LOGIN_SERVER }}   # e.g. hydrusacr.azurecr.io
-  K8S_NAMESPACE: hydrus
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Job 0 — Detect which services changed (skip unnecessary builds)
-# ─────────────────────────────────────────────────────────────────────────────
 jobs:
-  changes:
-    name: Detect Changed Paths
+  build:
     runs-on: ubuntu-latest
-    outputs:
-      backend:  ${{ steps.filter.outputs.backend }}
-      frontend: ${{ steps.filter.outputs.frontend }}
-      k8s:      ${{ steps.filter.outputs.k8s }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Path filter
-        uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            backend:
-              - 'backend/**'
-            frontend:
-              - 'frontend/**'
-            k8s:
-              - 'k8s/**'
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # Job 1 — Code Quality (runs if backend changed, or on any PR)
-  # ─────────────────────────────────────────────────────────────────────────
-  code-quality:
-    name: Code Quality & Security Scan
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.backend == 'true' || github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0          # SonarQube needs full git history
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Lint — ruff
-        working-directory: backend
-        run: |
-          pip install ruff --quiet
-          ruff check .
-
-      - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@master
-        env:
-          SONAR_TOKEN:    ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-
-      - name: SonarQube Quality Gate
-        uses: SonarSource/sonarqube-quality-gate-action@master
-        timeout-minutes: 5
-        env:
-          SONAR_TOKEN:    ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # Job 2a — Build & Push BACKEND (only if backend/ changed)
-  # ─────────────────────────────────────────────────────────────────────────
-  build-backend:
-    name: Build · Scan · Push — Backend
-    runs-on: ubuntu-latest
-    needs: [changes, code-quality]
-    if: needs.changes.outputs.backend == 'true'
-    outputs:
-      image_tag: ${{ steps.meta.outputs.image_tag }}
 
     steps:
-      - uses: actions/checkout@v4
+    # ✅ Checkout source code
+    - name: Checkout source code
+      uses: actions/checkout@v3
 
-      - name: Set image tag
-        id: meta
-        run: |
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
-          BRANCH=$(echo "${{ github.ref_name }}" | tr '/' '-')
-          echo "image_tag=${BRANCH}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+    # ✅ SonarQube Static Analysis
+    - name: SonarQube Scan
+      uses: sonarsource/sonarqube-scan-action@master
+      env:
+        SONAR_TOKEN: sqa_ff6b0e2ce9ac3d601a3d2e8d15ac7cfd6f42e077
+        SONAR_HOST_URL: http://localhost:9000
+      with:
+        projectBaseDir: .
 
-      - name: Azure Login
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+    # ✅ SonarQube Quality Gate
+    - name: Wait & Check Quality Gate
+      uses: sonarsource/sonarqube-quality-gate-action@master
+      env:
+        SONAR_TOKEN: sqa_ff6b0e2ce9ac3d601a3d2e8d15ac7cfd6f42e077
+        SONAR_HOST_URL: http://localhost:9000
 
-      - name: ACR Login
-        run: az acr login --name ${{ secrets.ACR_NAME }}
+    # ✅ Set up Docker Buildx
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+    # ✅ Login to Docker Hub Account
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: fkfiroj
+        password: Docker@@##
 
-      - name: Build Backend Image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./backend
-          file: ./backend/Dockerfile
-          target: production
-          push: false                        # build locally first for Trivy
-          load: true
-          tags: |
-            ${{ env.ACR_NAME }}/hydrus-backend:${{ steps.meta.outputs.image_tag }}
-            ${{ env.ACR_NAME }}/hydrus-backend:latest
-          cache-from: type=gha
-          cache-to:   type=gha,mode=max
+    # ✅ Build Docker Image
+    - name: Build Docker image
+      run: |
+        docker build -t fkfiroj/laravel-app:${{ github.sha }} .
 
-      - name: Trivy Scan — Backend (CRITICAL/HIGH block)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: "${{ env.ACR_NAME }}/hydrus-backend:${{ steps.meta.outputs.image_tag }}"
-          format: "sarif"
-          output: "trivy-backend.sarif"
-          exit-code: "1"
-          severity: "CRITICAL,HIGH"
-          ignore-unfixed: true
+    # ✅ Trivy Security Scan
+    - name: Trivy Vulnerability Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: fkfiroj/laravel-app:${{ github.sha }}
+        format: table
+        exit-code: 1
+        severity: CRITICAL,HIGH
+        ignore-unfixed: true
+        # ignore-policy: .trivyignore
 
-      - name: Upload Trivy SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: trivy-backend.sarif
+    # ✅ Push Docker Image (only if Trivy passes)
+    - name: Push Docker image
+      run: |
+        docker push fkfiroj/laravel-app:${{ github.sha }}
 
-      - name: Push Backend to ACR (only if Trivy passed)
-        run: |
-          docker push ${{ env.ACR_NAME }}/hydrus-backend:${{ steps.meta.outputs.image_tag }}
-          docker push ${{ env.ACR_NAME }}/hydrus-backend:latest
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # Job 2b — Build & Push FRONTEND (only if frontend/ changed)
-  # ─────────────────────────────────────────────────────────────────────────
-  build-frontend:
-    name: Build · Scan · Push — Frontend
-    runs-on: ubuntu-latest
-    needs: changes
-    if: needs.changes.outputs.frontend == 'true'
-    outputs:
-      image_tag: ${{ steps.meta.outputs.image_tag }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set image tag
-        id: meta
-        run: |
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-8)
-          BRANCH=$(echo "${{ github.ref_name }}" | tr '/' '-')
-          echo "image_tag=${BRANCH}-${SHORT_SHA}" >> $GITHUB_OUTPUT
-
-      - name: Azure Login
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: ACR Login
-        run: az acr login --name ${{ secrets.ACR_NAME }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Frontend Image
-        uses: docker/build-push-action@v5
-        with:
-          context: ./frontend
-          file: ./frontend/Dockerfile
-          target: production
-          push: false
-          load: true
-          build-args: |
-            REACT_APP_API_BASE_URL=${{ secrets.API_BASE_URL }}
-          tags: |
-            ${{ env.ACR_NAME }}/hydrus-frontend:${{ steps.meta.outputs.image_tag }}
-            ${{ env.ACR_NAME }}/hydrus-frontend:latest
-          cache-from: type=gha
-          cache-to:   type=gha,mode=max
-
-      - name: Trivy Scan — Frontend
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: "${{ env.ACR_NAME }}/hydrus-frontend:${{ steps.meta.outputs.image_tag }}"
-          format: "sarif"
-          output: "trivy-frontend.sarif"
-          exit-code: "1"
-          severity: "CRITICAL,HIGH"
-          ignore-unfixed: true
-
-      - name: Upload Trivy SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: trivy-frontend.sarif
-
-      - name: Push Frontend to ACR
-        run: |
-          docker push ${{ env.ACR_NAME }}/hydrus-frontend:${{ steps.meta.outputs.image_tag }}
-          docker push ${{ env.ACR_NAME }}/hydrus-frontend:latest
-
-  # ─────────────────────────────────────────────────────────────────────────
-  # Job 3 — Update manifest repo → ArgoCD picks up the change and deploys
-  #
-  # This replaces direct kubectl apply. CI never touches the cluster.
-  # ArgoCD watches the manifest repo and syncs automatically.
-  # ─────────────────────────────────────────────────────────────────────────
-  update-manifests:
-    name: Update Manifest Repo (GitOps)
-    runs-on: ubuntu-latest
-    needs: [build-backend, build-frontend]
-    # Run if at least one build job succeeded (use always() to check individually)
-    if: |
-      always() &&
-      github.event_name == 'push' &&
-      (needs.build-backend.result == 'success' || needs.build-frontend.result == 'success')
-
-    steps:
-      - name: Checkout manifest repo
-        uses: actions/checkout@v4
-        with:
-          # Point to your dedicated GitOps / manifest repository
-          repository: ${{ secrets.MANIFEST_REPO }}          # e.g. your-org/hydrus-manifests
-          token:      ${{ secrets.MANIFEST_REPO_PAT }}      # PAT with repo write access
-          ref: main
-
-      - name: Configure git
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Determine environment folder
-        id: env
-        run: |
-          if [ "${{ github.ref_name }}" == "main" ]; then
-            echo "folder=prod" >> $GITHUB_OUTPUT
-          else
-            echo "folder=dev" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Update backend image tag
-        if: needs.build-backend.result == 'success'
-        run: |
-          IMAGE_TAG=${{ needs.build-backend.outputs.image_tag }}
-          sed -i "s|image: .*hydrus-backend:.*|image: ${{ env.ACR_NAME }}/hydrus-backend:${IMAGE_TAG}|g" \
-            k8s/${{ steps.env.outputs.folder }}/backend-deployment.yaml
-          echo "Backend image updated → ${IMAGE_TAG}"
-
-      - name: Update frontend image tag
-        if: needs.build-frontend.result == 'success'
-        run: |
-          IMAGE_TAG=${{ needs.build-frontend.outputs.image_tag }}
-          sed -i "s|image: .*hydrus-frontend:.*|image: ${{ env.ACR_NAME }}/hydrus-frontend:${IMAGE_TAG}|g" \
-            k8s/${{ steps.env.outputs.folder }}/frontend-deployment.yaml
-          echo "Frontend image updated → ${IMAGE_TAG}"
-
-      - name: Commit and push manifest changes
-        run: |
-          git add k8s/
-          # Only commit if there are actual changes
-          if git diff --cached --quiet; then
-            echo "No manifest changes to commit."
-          else
-            git commit -m "chore: update image tags [skip ci]
-
-  Triggered by: ${{ github.repository }}@${{ github.sha }}
-  Branch: ${{ github.ref_name }}
-  Actor: ${{ github.actor }}"
-            git push origin main
-          fi
+    

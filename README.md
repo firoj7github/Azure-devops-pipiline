@@ -73,9 +73,9 @@ hydrus-devops-assessment/
 
 ## Quick Start (Local Docker)
 
-### Prerequisites
-- Docker Desktop ≥ 24
-- Docker Compose v2
+### 1. Prerequisites
+*   **Docker Desktop ≥ 24** (Windows/macOS) or **Docker Engine & Compose v2** (Linux).
+*   **Git** installed on your system.
 
 ### Run locally
 
@@ -420,7 +420,7 @@ For production, **custom metrics** would be added:
 
 ---
 
-# 🚀 Hydrus CI/CD Pipeline | Azure DevOps & AKS
+# 🚀 CI/CD Pipeline | Azure DevOps & AKS
 
 This project implements a robust CI/CD pipeline for a full-stack application (Backend & Frontend). It integrates automated builds, security scanning, and deployment to Azure Kubernetes Service (AKS) with a focus on high availability and security.
 
@@ -480,7 +480,6 @@ Sensitive and environment-specific data is stored in the **Library > Variable Gr
 3.  **Verify:** After the "Deploy" stage turns green, check your AKS Ingress URL to see the live application.
 
 ---
-*Developed as part of the Hydrus DevOps Assessment Framework.*
 
 ### Q16. Rollback strategy for a failed deployment
 

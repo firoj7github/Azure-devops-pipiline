@@ -5,10 +5,9 @@ function App() {
   const [status, setStatus] = useState('Checking...');
 
   useEffect(() => {
-    // API কল চেক করার জন্য একটি উদাহরণ
     fetchHealth()
-      .then(() => setStatus('Backend Connected ✅'))
-      .catch(() => setStatus('Backend Not Reachable ❌'));
+      .then(() => setStatus('Backend Connected'))
+      .catch(() => setStatus('Backend Not Reachable'));
   }, []);
 
   return (
