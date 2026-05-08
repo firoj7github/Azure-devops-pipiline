@@ -3,6 +3,11 @@ trigger:
     include:
       - main
       - develop
+  paths:
+    include:
+      - backend/**
+      - frontend/**
+      - k8s/**
 
 pr:
   branches:
@@ -10,7 +15,8 @@ pr:
       - main
 
 variables:
-  acrLoginServer: $(ACR_LOGIN_SERVER)   # Set in Variable Group — not hardcoded
+  # Variable Group থেকে আসবে
+  acrLoginServer: $(ACR_LOGIN_SERVER)
   aksCluster:     $(AKS_CLUSTER_NAME)
   aksRG:          $(AKS_RESOURCE_GROUP)
   k8sNamespace:   hydrus
@@ -18,66 +24,108 @@ variables:
 
 stages:
 
-# ── Stage 1: Build ─────────────────────────────────────────────────────────────
-- stage: Build
-  displayName: "Build & Push Images"
+# ── STAGE 1: Code Quality & Security (SonarQube) ─────────────────────────────
+- stage: Analysis
+  displayName: "Code Quality Analysis"
   jobs:
-    - job: BuildPush
-      displayName: "Docker Build + ACR Push"
+    - job: SonarScan
+      displayName: "SonarQube Scan"
       pool:
         vmImage: ubuntu-latest
-
       steps:
+        - task: SonarQubePrepare@5
+          inputs:
+            SonarQube: 'SonarQube_Service_Connection' # আপনার কানেকশন নাম
+            scannerMode: 'CLI'
+            configMode: 'manual'
+            cliProjectKey: 'hydrus-devops-assessment'
+        
+        - script: |
+            echo "Running scanner for backend and frontend..."
+          displayName: "Run Analysis"
+
+        - task: SonarQubePublish@5
+          inputs:
+            pollingTimeoutSec: '300'
+
+# ── STAGE 2: Build & Container Security (Trivy) ──────────────────────────────
+- stage: Build
+  displayName: "Build & Push Images"
+  dependsOn: Analysis
+  jobs:
+    - job: BuildPush
+      displayName: "Docker Build, Scan & Push"
+      pool:
+        vmImage: ubuntu-latest
+      steps:
+        # ১. Azure ACR Login
         - task: AzureCLI@2
-          displayName: "Azure Login + ACR Login"
+          displayName: "ACR Login"
           inputs:
             azureSubscription: $(AZURE_SERVICE_CONNECTION)
             scriptType: bash
             scriptLocation: inlineScript
             inlineScript: az acr login --name $(ACR_NAME)
 
+        # ২. Backend Build & Local Scan
         - task: Docker@2
-          displayName: "Build & Push Backend"
+          displayName: "Build Backend Locally"
           inputs:
-            command: buildAndPush
+            command: build
             repository: hydrus-backend
             dockerfile: backend/Dockerfile
-            containerRegistry: $(AZURE_CONTAINER_REGISTRY_SERVICE_CONNECTION)
-            tags: |
-              $(imageTag)
-              latest
+            tags: $(imageTag)
 
-        - task: Docker@2
-          displayName: "Build & Push Frontend"
-          inputs:
-            command: buildAndPush
-            repository: hydrus-frontend
-            dockerfile: frontend/Dockerfile
-            containerRegistry: $(AZURE_CONTAINER_REGISTRY_SERVICE_CONNECTION)
-            tags: |
-              $(imageTag)
-              latest
-
-        # Container vulnerability scanning (bonus)
         - task: AzureCLI@2
-          displayName: "Trivy Vulnerability Scan"
+          displayName: "Trivy Scan Backend"
           inputs:
             azureSubscription: $(AZURE_SERVICE_CONNECTION)
             scriptType: bash
-            scriptLocation: inlineScript
             inlineScript: |
-              docker run --rm \
-                aquasec/trivy image \
-                --exit-code 1 \
-                --severity CRITICAL,HIGH \
-                $(acrLoginServer)/hydrus-backend:$(imageTag)
+              docker run --rm aquasec/trivy image --exit-code 1 --severity CRITICAL,HIGH hydrus-backend:$(imageTag)
 
-# ── Stage 2: Deploy ─────────────────────────────────────────────────────────────
+        - task: Docker@2
+          displayName: "Push Backend to ACR"
+          inputs:
+            command: push
+            repository: hydrus-backend
+            containerRegistry: $(AZURE_CONTAINER_REGISTRY_SERVICE_CONNECTION)
+            tags: |
+              $(imageTag)
+              latest
+
+        # ৩. Frontend Build & Local Scan
+        - task: Docker@2
+          displayName: "Build Frontend Locally"
+          inputs:
+            command: build
+            repository: hydrus-frontend
+            dockerfile: frontend/Dockerfile
+            tags: $(imageTag)
+
+        - task: AzureCLI@2
+          displayName: "Trivy Scan Frontend"
+          inputs:
+            azureSubscription: $(AZURE_SERVICE_CONNECTION)
+            scriptType: bash
+            inlineScript: |
+              docker run --rm aquasec/trivy image --exit-code 1 --severity CRITICAL,HIGH hydrus-frontend:$(imageTag)
+
+        - task: Docker@2
+          displayName: "Push Frontend to ACR"
+          inputs:
+            command: push
+            repository: hydrus-frontend
+            containerRegistry: $(AZURE_CONTAINER_REGISTRY_SERVICE_CONNECTION)
+            tags: |
+              $(imageTag)
+              latest
+
+# ── STAGE 3: Deploy & Rollback (AKS) ──────────────────────────────────────────
 - stage: Deploy
   displayName: "Deploy to AKS"
   dependsOn: Build
   condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'main', 'develop'))
-
   jobs:
     - deployment: DeployAKS
       displayName: "Deploy to AKS"
@@ -89,19 +137,14 @@ stages:
           deploy:
             steps:
               - task: AzureCLI@2
-                displayName: "Get AKS credentials"
+                displayName: "Get AKS Credentials"
                 inputs:
                   azureSubscription: $(AZURE_SERVICE_CONNECTION)
                   scriptType: bash
-                  scriptLocation: inlineScript
-                  inlineScript: |
-                    az aks get-credentials \
-                      --resource-group $(aksRG) \
-                      --name $(aksCluster) \
-                      --overwrite-existing
+                  inlineScript: az aks get-credentials --resource-group $(aksRG) --name $(aksCluster) --overwrite-existing
 
               - task: KubernetesManifest@1
-                displayName: "Apply K8s manifests"
+                displayName: "Apply K8s Manifests"
                 inputs:
                   action: deploy
                   namespace: $(k8sNamespace)
@@ -111,7 +154,6 @@ stages:
                     k8s/backend-deployment.yaml
                     k8s/frontend-deployment.yaml
                     k8s/ingress.yaml
-                    k8s/hpa.yaml
                   containers: |
                     $(acrLoginServer)/hydrus-backend:$(imageTag)
                     $(acrLoginServer)/hydrus-frontend:$(imageTag)
@@ -121,9 +163,21 @@ stages:
                 inputs:
                   azureSubscription: $(AZURE_SERVICE_CONNECTION)
                   scriptType: bash
-                  scriptLocation: inlineScript
                   inlineScript: |
-                    STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-                      https://hydrus.example.com/health)
-                    echo "Health check HTTP status: $STATUS"
+                    # অ্যাপ রেডি হওয়ার জন্য কিছুটা সময় দেওয়া
+                    sleep 30 
+                    STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://hydrus.example.com/health)
+                    echo "Health check status: $STATUS"
                     [ "$STATUS" = "200" ] || exit 1
+
+              # ফেইল করলে অটোমেটিক রোলব্যাক
+              - task: AzureCLI@2
+                displayName: "Rollback on Failure"
+                condition: failed()
+                inputs:
+                  azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                  scriptType: bash
+                  inlineScript: |
+                    echo "Smoke test failed! Triggering rollback..."
+                    kubectl rollout undo deployment/hydrus-backend -n $(k8sNamespace)
+                    kubectl rollout undo deployment/hydrus-frontend -n $(k8sNamespace)

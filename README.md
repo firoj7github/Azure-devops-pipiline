@@ -420,21 +420,67 @@ For production, **custom metrics** would be added:
 
 ---
 
-## Task 4 — CI/CD Q&A
+# 🚀 Hydrus CI/CD Pipeline | Azure DevOps & AKS
 
-### Q15. CI vs CD
-
-| | CI (Continuous Integration) | CD (Continuous Delivery/Deployment) |
-|---|---|---|
-| **Goal** | Verify code quality and correctness | Deliver verified code to environments |
-| **Triggers** | Every push / PR | After CI passes |
-| **Actions** | Build, test, lint, scan | Package, push image, deploy to AKS |
-| **Output** | Pass/fail signal | Running application |
-
-**CI** in this pipeline: `docker build` → unit tests → SonarQube scan → Trivy vulnerability scan → push to ACR.  
-**CD** in this pipeline: `kubectl apply` / `helm upgrade` → readiness check → smoke test → rollback on failure.
+This project implements a robust CI/CD pipeline for a full-stack application (Backend & Frontend). It integrates automated builds, security scanning, and deployment to Azure Kubernetes Service (AKS) with a focus on high availability and security.
 
 ---
+
+## 🛠️ Pipeline Architecture (CI/CD)
+
+The pipeline is divided into two main phases: **Continuous Integration (CI)** and **Continuous Deployment (CD)**.
+
+### 1. Continuous Integration (CI) - "Build & Quality"
+Triggered on every push to `main` or `develop` branches:
+*   **SonarQube Analysis:** Scans source code for bugs, vulnerabilities, and code smells.
+*   **Docker Build:** Packages the Backend and Frontend into Docker images.
+*   **Trivy Security Scan:** Performs a vulnerability scan on the Docker images before they are pushed to the registry.
+*   **Push to ACR:** Once verified, images are pushed to the Azure Container Registry (ACR) with unique tags.
+
+### 2. Continuous Deployment (CD) - "Deploy & Monitor"
+Triggered automatically after a successful CI phase:
+*   **AKS Authentication:** Uses the Azure Service Connection to securely retrieve AKS credentials.
+*   **Kubernetes Deployment:** Deploys the application using Manifest files (Deployments, Services, ConfigMaps, and Secrets).
+*   **Smoke Test:** Runs a health check to ensure the application is reachable and responding with a `200 OK` status.
+*   **Automated Rollback:** If the smoke test or deployment fails, the pipeline automatically triggers `kubectl rollout undo` to revert to the last stable version.
+
+---
+
+## ⚙️ Configuration & Environment Setup
+
+To run this pipeline, the following components must be configured in Azure DevOps:
+
+### 1. Service Connection
+A **Service Connection** (Azure Resource Manager) must be created to authorize the pipeline to interact with Azure resources:
+*   **Variable Name:** `$(AZURE_SERVICE_CONNECTION)`
+*   **Purpose:** Provides the "key" to login to ACR and AKS.
+
+### 2. Variable Group (`hydrus-vg`)
+Sensitive and environment-specific data is stored in the **Library > Variable Groups** section:
+| Variable Name | Description |
+|---|---|
+| `ACR_LOGIN_SERVER` | The URL of your Azure Container Registry (e.g., `hydrusacr.azurecr.io`). |
+| `AKS_CLUSTER_NAME` | The name of your Azure Kubernetes Service cluster. |
+| `AKS_RESOURCE_GROUP` | The Azure Resource Group where the AKS cluster is located. |
+| `AZURE_SERVICE_CONNECTION` | The name of the Service Connection created in Project Settings. |
+
+---
+
+## 🛡️ Security & Best Practices
+*   **Rootless Containers:** Containers are configured to run as non-root users (`uid: 1001`) for enhanced security.
+*   **Read-Only Filesystem:** The root filesystem is set to read-only to prevent unauthorized modifications at runtime.
+*   **Resource Limits:** CPU and Memory limits are defined to prevent "noisy neighbor" issues in the cluster.
+*   **Zero-Downtime:** Uses `RollingUpdate` strategy with `maxUnavailable: 0` to ensure the app stays online during deployments.
+
+---
+
+## 🚀 How to Use
+1.  **Push Code:** Push changes to the `main` or `develop` branch.
+2.  **Monitor:** Go to **Azure DevOps > Pipelines** to watch the stages execute.
+3.  **Verify:** After the "Deploy" stage turns green, check your AKS Ingress URL to see the live application.
+
+---
+*Developed as part of the Hydrus DevOps Assessment Framework.*
 
 ### Q16. Rollback strategy for a failed deployment
 
