@@ -62,8 +62,8 @@ kubectl version --client
 ### Step 1 — Clone the Repository
 
 ```bash
-git clone https://github.com/<your-org>/hydrus-devops.git
-cd hydrus-devops
+git clone https://github.com/firoj7github/DevOps-Assessment
+cd DevOps-Assessment
 ```
 
 ### Step 2 — Create Environment File
@@ -92,7 +92,7 @@ First time running will build the image — may take 2-3 minutes.
 | Frontend (React app) | http://localhost:3000 |
 | Backend API Docs | http://localhost:8000/api/docs |
 | Health Check | http://localhost:8000/health |
-| pgAdmin (database UI) | http://localhost:5050 |
+
 
 ### Useful Commands
 
